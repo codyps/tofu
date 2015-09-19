@@ -1,0 +1,7 @@
+TOFO: Trust On First Use
+========================
+
+Code to ease implimentations of systems that impliment trust-on-first-use, or
+even systems that just need to support zero-downtime certificate upgrading.
+
+This is currently incomplete
