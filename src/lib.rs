@@ -205,7 +205,7 @@ fn test_certstore () {
     let id = b"tofu-test-host-ident";
 
     {
-        let c = CertStore::from(d).expect("constructing cert store failed");
+        let c = CertStore::from(d.clone()).expect("constructing cert store failed");
         c.insert(name, id, &cert.0).expect("insert failed");
         let x = c.latest(name).expect("error retreving latest cert after insert");
         let x = x.expect("no cert found after insert");
@@ -213,6 +213,16 @@ fn test_certstore () {
         assert_eq!(x.0, id);
         assert_eq!(x.1.fingerprint(Type::SHA256), cert.0.fingerprint(Type::SHA256));
     }
+
+    {
+        let c = CertStore::from(d).expect("constructing cert store (2nd time) failed");
+        let x = c.latest(name).expect("error retreving latest cert after re-open");
+        let x = x.expect("no cert found after re-open");
+
+        assert_eq!(x.0, id);
+        assert_eq!(x.1.fingerprint(Type::SHA256), cert.0.fingerprint(Type::SHA256));
+    }
+
 }
 
 
