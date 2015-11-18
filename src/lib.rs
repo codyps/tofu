@@ -33,8 +33,8 @@ use std::path::PathBuf;
 ///
 /// Right now we presume that no other processes are modifying a single CertStore at the same time,
 /// but in the future we could add file locking to address this.
-struct CertStore {
-    pub root: PathBuf,
+pub struct CertStore {
+    root: PathBuf,
 }
 
 impl CertStore {
@@ -51,7 +51,8 @@ impl CertStore {
          * If our desired version exists, use it.
          */
 
-        path.push("tofu-certstore");
+        path.push("tofu-store");
+        path.push("cert");
         path.push(format!("v{}", CertStore::version()));
         try!(fs::create_dir_all(&path));
         Ok(CertStore { root: path })
@@ -185,7 +186,6 @@ impl CertStore {
 #[test]
 fn test_certstore () {
     use openssl::crypto::hash::Type;
-    use openssl::x509::extension::{Extension, ExtKeyUsageOption};
 
     env_logger::init();
 
@@ -225,21 +225,36 @@ fn test_certstore () {
 
 }
 
-
 /// Server side portion, tracks private keys
-struct KeyStore {
-    pub root: PathBuf,
+pub struct KeyStore {
+    root: PathBuf,
+    host: Vec<u8>,
 }
 
+pub struct KeyStoreIter;
+
 impl KeyStore {
-    pub fn new(path: PathBuf, hostname: Vec<u8>) -> Result<Self, io::Error> {
+    pub fn new(mut path: PathBuf, hostname: Vec<u8>) -> Result<Self, io::Error> {
+        /*
+         * TODO
+         * Probe for a key store, if none exists, create it.
+         * If there is some other trash left in the dir (incomplete upgrades) note it an nuke it.
+         * If an old version exists, try to update or complain.
+         * If our desired version exists, use it.
+         */
+
+        path.push("tofu-store");
+        path.push("key");
+        path.push(format!("v{}", CertStore::version()));
+        try!(fs::create_dir_all(&path));
+        Ok(KeyStore { root: path, host: hostname })
+    }
+
+    pub fn iter(&self) -> Result<KeyStoreIter, io::Error> {
         unimplemented!();
     }
 
-    //pub fn map() {
-    //}
-
-    pub fn force_new_key() {
+    pub fn new_key(&self) {
         unimplemented!();
     }
 }
