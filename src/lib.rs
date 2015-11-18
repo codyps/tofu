@@ -132,7 +132,7 @@ impl CertStore {
      *
      * FIXME: we really want an iterator that starts at the last entry and proceeds backwards
      */
-    pub fn latest(&self, host: &str) -> Result<Option<(Vec<u8>, Cert)>, io::Error> {
+    pub fn latest(&self, host: &str) -> Result<Option<(Vec<u8>, Cert, u64)>, io::Error> {
         let h = try!(self.latest_entry(host));
         match h {
             Some(ref h) => {
@@ -141,7 +141,7 @@ impl CertStore {
                 try!(try!(fs::File::open(p.join("ident"))).read_to_end(&mut ident));
                 // FIXME: return error
                 let cert = openssl::x509::X509::from_pem(&mut try!(fs::File::open(p.join("cert.pem")))).unwrap();
-                Ok(Some((ident, cert)))
+                Ok(Some((ident, cert, h.1)))
             },
             None => Ok(None)
         }
@@ -151,24 +151,14 @@ impl CertStore {
         format!("{:08}.d", u)
     }
 
-    pub fn insert(&self, host: &str, ident: &[u8], cert: &Cert) -> Result<(), io::Error> {
+    pub fn insert(&self, host: &str, ident: &[u8], cert: &Cert) -> Result<u64, io::Error> {
 
         let h = try!(self.latest_entry(host));
-        let next_dir = match h {
-            Some(ref d) => {
-
-                /* What if the file_name is non-numeric?
-                 * Options:
-                 *  - forbid new insertions
-                 *  - provide some generalized way to make something come later (suffix adjustment)
-                 */
-                /* try to parse from the end of the file_name as a number. Not clear this is
-                 * possible due to OsString being a POS
-                 */
-                Self::serial(d.1 + 1)
-            },
-            None => Self::serial(0)
+        let s = match h {
+            Some(ref d) => d.1 + 1,
+            None => 0
         };
+        let next_dir = Self::serial(s);
 
         let mut p = self.root.join(host);
         p.push(next_dir);
@@ -179,9 +169,22 @@ impl CertStore {
 
         // FIXME: proper error returns
         cert.write_pem(&mut try!(fs::File::create(p.join("cert.pem")))).unwrap();
-        Ok(())
+        Ok(s)
     }
 }
+
+#[cfg(test)]
+fn some_cert(name: String) -> (openssl::x509::X509<'static>, openssl::crypto::pkey::PKey) {
+    use openssl::crypto::hash::Type;
+    openssl::x509::X509Generator::new()
+        .set_bitlength(2048)
+        .set_valid_period(365 * 2)
+        .add_name("CN".to_owned(), name)
+        .set_sign_hash(Type::SHA256)
+        .generate()
+        .unwrap()
+}
+
 
 #[test]
 fn test_certstore () {
@@ -189,17 +192,9 @@ fn test_certstore () {
 
     env_logger::init();
 
-    let cert = openssl::x509::X509Generator::new()
-        .set_bitlength(2048)
-        .set_valid_period(365 * 2)
-        .add_name("CN".to_owned(), "tofu-test".to_owned())
-        .set_sign_hash(Type::SHA256)
-        .generate()
-        .unwrap();
-
+    let cert = some_cert("tofu-1".to_owned());
     let td = TempDir::new("tofu-test").unwrap();
-    //let d = td.path().to_owned();
-    let d = td.into_path();
+    let d = td.path().to_owned();
 
     let name = "tofu-test-host";
     let id = b"tofu-test-host-ident";
@@ -212,6 +207,7 @@ fn test_certstore () {
 
         assert_eq!(x.0, id);
         assert_eq!(x.1.fingerprint(Type::SHA256), cert.0.fingerprint(Type::SHA256));
+        assert_eq!(x.2, 0);
     }
 
     {
@@ -221,7 +217,20 @@ fn test_certstore () {
 
         assert_eq!(x.0, id);
         assert_eq!(x.1.fingerprint(Type::SHA256), cert.0.fingerprint(Type::SHA256));
+        assert_eq!(x.2, 0);
+
+        let cert = some_cert("tofu-2".to_owned());
+        c.insert(name, id, &cert.0).expect("insert 2 failed");
+
+        let x = c.latest(name).expect("error getting latest after inserting second");
+        let x = x.expect("no cert found after inserting second");
+
+        assert_eq!(x.0, id);
+        assert_eq!(x.1.fingerprint(Type::SHA256), cert.0.fingerprint(Type::SHA256));
+        assert_eq!(x.2, 1);
     }
+
+    // TODO: check actual directory shape
 
 }
 
@@ -259,3 +268,8 @@ impl KeyStore {
     }
 }
 
+#[test]
+fn test_keystore() {
+    let cert = some_cert("tofu-1".to_owned());
+    let td = TempDir::new("tofu-test").unwrap();
+}
