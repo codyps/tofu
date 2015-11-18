@@ -60,13 +60,14 @@ impl CertStore {
     /**
      * locate the latest entry in the store, and return that location
      */
-    pub fn last_dirent(&self, host: &str) -> Result<Option<(fs::DirEntry, u64)>, io::Error> {
+    fn latest_entry(&self, host: &str) -> Result<Option<(fs::DirEntry, u64)>, io::Error> {
         let mut h : Option<(fs::DirEntry, u64)> = None;
         let p = self.root.join(host);
         let rd = match fs::read_dir(&p) {
             Ok(x) => x,
             Err(e) => {
                 if e.kind() == io::ErrorKind::NotFound {
+                    warn!("Not found: {:?}", &p);
                     return Ok(None)
                 } else {
                     return Err(e);
@@ -131,7 +132,7 @@ impl CertStore {
      * FIXME: we really want an iterator that starts at the last entry and proceeds backwards
      */
     pub fn latest(&self, host: &str) -> Result<Option<(Vec<u8>, Cert)>, io::Error> {
-        let h = try!(self.last_dirent(host));
+        let h = try!(self.latest_entry(host));
         match h {
             Some(ref h) => {
                 let p = h.0.path();
@@ -149,9 +150,9 @@ impl CertStore {
         format!("{:08}.d", u)
     }
 
-    pub fn insert(&self, host: &str, ident: &[u8], cert: Cert) -> Result<(), io::Error> {
+    pub fn insert(&self, host: &str, ident: &[u8], cert: &Cert) -> Result<(), io::Error> {
 
-        let h = try!(self.last_dirent(host));
+        let h = try!(self.latest_entry(host));
         let next_dir = match h {
             Some(ref d) => {
 
@@ -168,7 +169,8 @@ impl CertStore {
             None => Self::serial(0)
         };
 
-        let p = self.root.join(next_dir);
+        let mut p = self.root.join(host);
+        p.push(next_dir);
         try!(fs::create_dir_all(&p));
 
         // FIXME: write to temp dir first and fsync before moving dir into place
@@ -191,22 +193,25 @@ fn test_certstore () {
         .set_bitlength(2048)
         .set_valid_period(365 * 2)
         .add_name("CN".to_owned(), "tofu-test".to_owned())
-        .set_sign_hash(openssl::crypto::hash::Type::SHA256)
+        .set_sign_hash(Type::SHA256)
         .generate()
         .unwrap();
 
-    let d = TempDir::new("tofu-test").unwrap();
+    let td = TempDir::new("tofu-test").unwrap();
+    //let d = td.path().to_owned();
+    let d = td.into_path();
 
     let name = "tofu-test-host";
     let id = b"tofu-test-host-ident";
 
     {
-        let c = CertStore::from(d.path().to_owned()).expect("constructing cert store failed");
-        c.insert(name, id, cert.0).expect("insert failed");
+        let c = CertStore::from(d).expect("constructing cert store failed");
+        c.insert(name, id, &cert.0).expect("insert failed");
         let x = c.latest(name).expect("error retreving latest cert after insert");
         let x = x.expect("no cert found after insert");
 
         assert_eq!(x.0, id);
+        assert_eq!(x.1.fingerprint(Type::SHA256), cert.0.fingerprint(Type::SHA256));
     }
 }
 
