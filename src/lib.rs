@@ -24,8 +24,8 @@ use std::path::PathBuf;
 /// certificate.
 ///
 /// File system layout looks like:
-/// <root>/tofu-certstore/v<version>/<host>/<serial>.d/cert
-/// <root>/tofu-certstore/v<version>/<host>/<serial>.d/ident
+/// <root>/tofu-store/cert/v<version>/<host>/<serial>.d/cert.pem
+/// <root>/tofu-store/cert/v<version>/<host>/<serial>.d/ident
 ///
 /// To summarize:
 ///  - client controls <root>, <host>, and <serial>
@@ -235,6 +235,10 @@ fn test_certstore () {
 }
 
 /// Server side portion, tracks private keys
+///
+/// Filesystem layout:
+///  <root>/tofu-store/key/v<version>/<host>/<ident>/cert.pem
+///
 pub struct KeyStore {
     root: PathBuf,
     host: Vec<u8>,
@@ -263,7 +267,7 @@ impl KeyStore {
         unimplemented!();
     }
 
-    pub fn new_key(&self) {
+    pub fn new_key(&self) -> Result<(Cert, u64), io::Error> {
         unimplemented!();
     }
 }
