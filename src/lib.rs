@@ -16,6 +16,83 @@ use std::{fs, io};
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
+
+pub struct SerialDirItem {
+    pub dirent: fs::DirEntry,
+    pub serial: u64,
+}
+
+pub struct SerialDirIter {
+    pub inner: fs::ReadDir,
+}
+
+impl SerialDirIter {
+    /* TODO: generalize over any iterator returning the right Item */
+    pub fn new(inner: fs::ReadDir) -> SerialDirIter {
+        SerialDirIter { inner: inner }
+    }
+}
+
+impl Iterator for SerialDirIter {
+    type Item = io::Result<SerialDirItem>;
+
+    /*
+     * filter items that don't end in '.d'
+     *
+     * Warn about items that do, but aren't prefixed with a number
+     * Warn about non-utf8 names
+     *
+     * The only correct way to exclude a file is to change or append a new suffix.
+     */
+    fn next(&mut self) -> Option<io::Result<SerialDirItem>>
+    {
+        loop {
+            let trd = self.inner.next();
+            let me = match trd {
+                Some(v) => v,
+                None => return None
+            };
+
+            let e = match me {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e))
+            };
+
+            let fna = e.file_name();
+            let f = match fna.to_str() {
+                Some(x) => x,
+                None => {
+                    warn!("weird file name '{:?}', skipping", fna);
+                    continue
+                }
+            };
+
+            if !f.ends_with(".d") {
+                continue
+            }
+
+            /*
+             * XXX: consider also checking if this is a directory (once we have directory handles)
+             */
+            let nf = &f[.. f.len()-2];
+
+            let n = match nf.parse::<u64>() {
+                Ok(x) => x,
+                Err(e) => {
+                    warn!("file '{}' ends with .d but doesn't start with a number: {}",
+                          f, e);
+                    continue
+                }
+            };
+
+            return Some(Ok(SerialDirItem {
+                serial: n,
+                dirent: e
+            }))
+        }
+    }
+}
+
 /// Client side portion, tracks certificates (which include public keys)
 ///
 /// Tracks multiple 'hosts' identified by unique ids (typically hostnames). Each 'host' has
@@ -61,8 +138,8 @@ impl CertStore {
     /**
      * locate the latest entry in the store, and return that location
      */
-    fn latest_entry(&self, host: &str) -> Result<Option<(fs::DirEntry, u64)>, io::Error> {
-        let mut h : Option<(fs::DirEntry, u64)> = None;
+    fn latest_entry(&self, host: &str) -> Result<Option<SerialDirItem>, io::Error> {
+        let mut h : Option<SerialDirItem> = None;
         let p = self.root.join(host);
         let rd = match fs::read_dir(&p) {
             Ok(x) => x,
@@ -76,47 +153,13 @@ impl CertStore {
             },
         };
 
-        for me in rd {
+        for me in SerialDirIter::new(rd) {
             let e = try!(me);
-
-            /*
-             * filter items that don't end in '.d'
-             *
-             * Warn about items that do, but aren't prefixed with a number
-             */
-            let fna = e.file_name();
-            let f = match fna.to_str() {
-                Some(x) => x,
-                None => {
-                    warn!("weird file name '{:?}', skipping", e.file_name());
-                    continue
-                }
-            };
-
-            if !f.ends_with(".d") {
-                continue
-            }
-
-            /*
-             * XXX: consider also checking if this is a directory (once we have directory handles)
-             */
-
-            let nf = &f[.. f.len()-2];
-
-            let n = match nf.parse::<u64>() {
-                Ok(x) => x,
-                Err(e) => {
-                    warn!("file '{}' ends with .d but doesn't start with a number: {}",
-                          f, e);
-                    continue
-                }
-            };
-
             h = match h {
-                None => Some((e, n)),
+                None => Some(e),
                 Some(ch) => {
-                    if ch.1 < n {
-                        Some((e, n))
+                    if ch.serial < e.serial {
+                        Some(e)
                     } else {
                         Some(ch)
                     }
@@ -136,12 +179,12 @@ impl CertStore {
         let h = try!(self.latest_entry(host));
         match h {
             Some(ref h) => {
-                let p = h.0.path();
+                let p = h.dirent.path();
                 let mut ident = vec![];
                 try!(try!(fs::File::open(p.join("ident"))).read_to_end(&mut ident));
                 // FIXME: return error
                 let cert = openssl::x509::X509::from_pem(&mut try!(fs::File::open(p.join("cert.pem")))).unwrap();
-                Ok(Some((ident, cert, h.1)))
+                Ok(Some((ident, cert, h.serial)))
             },
             None => Ok(None)
         }
@@ -155,7 +198,7 @@ impl CertStore {
 
         let h = try!(self.latest_entry(host));
         let s = match h {
-            Some(ref d) => d.1 + 1,
+            Some(ref d) => d.serial + 1,
             None => 0
         };
         let next_dir = Self::serial(s);
@@ -190,7 +233,7 @@ fn some_cert(name: String) -> (openssl::x509::X509<'static>, openssl::crypto::pk
 fn test_certstore () {
     use openssl::crypto::hash::Type;
 
-    env_logger::init();
+    env_logger::init().unwrap();
 
     let cert = some_cert("tofu-1".to_owned());
     let td = TempDir::new("tofu-test").unwrap();
