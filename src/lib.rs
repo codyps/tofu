@@ -11,11 +11,59 @@ extern crate env_logger;
 use tempdir::TempDir;
 
 pub use openssl::x509::X509 as Cert;
+pub use openssl::crypto::pkey::PKey as Key;
 
+pub use openssl::ssl::SslContext;
+pub use openssl::ssl::error::SslError;
+
+use std::fmt;
+use std::rc::Rc;
 use std::{fs, io};
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{PathBuf, Path};
+use std::collections::HashMap;
+use std::marker::PhantomData;
 
+#[derive(Debug)]
+pub enum E {
+    /* CertStore base operations */
+    BasePathCreate(PathBuf, io::Error),
+    CreateDir(PathBuf, io::Error),
+    ReadDir(PathBuf, io::Error),
+    Entry(PathBuf, io::Error),
+    LatestEntry(io::Error),
+    // TODO: this should be parameterized on the associated type of DirStore
+    Insert(Box<E>),
+    FromDir(Box<E>),
+
+    /* KeyStore: init */
+    CertStoreCreate(PathBuf, io::Error),
+
+    /* Keystore: ctx related */
+    CtxCreate(SslError),
+    InitCtxs(io::Error),
+
+    /* DirStore for Public */
+    /*  from_dir */
+    NameLoad(err::NameLoad),
+    LoadCert(SslError),
+    OpenCert(io::Error),
+
+    /*  to_dir */
+    CreateName(io::Error),
+    StoreName(io::Error),
+    CreateCert(io::Error),
+    StoreCert(SslError),
+
+    /* DirStore for Private */
+    /*  from_dir */
+    OpenKey(io::Error),
+    LoadKey(SslError),
+
+    /*  to_dir */
+    CreateKey(io::Error),
+    StoreKey(SslError),
+}
 
 pub struct SerialDirItem {
     pub dirent: fs::DirEntry,
@@ -93,28 +141,198 @@ impl Iterator for SerialDirIter {
     }
 }
 
+pub mod err {
+    use std::io;
+    use std::string::FromUtf8Error;
+    #[derive(Debug)]
+    pub enum NameLoad {
+        Open(io::Error),
+        Read(io::Error),
+        Convert(FromUtf8Error),
+    }
+}
+
+fn name_load<P: AsRef<Path>>(p: P) -> Result<String, err::NameLoad>
+{
+    let mut f = try!(fs::File::open(p).map_err(|e| err::NameLoad::Open(e)));
+    let mut v = vec![];
+    try!(f.read_to_end(&mut v).map_err(|e| err::NameLoad::Read(e)));
+    String::from_utf8(v).map_err(|e| err::NameLoad::Convert(e))
+}
+
+pub trait DirStore {
+    type E;
+    fn from_dir<P: AsRef<Path>>(path: P) -> Result<Self, E>
+        where Self: Sized;
+    fn to_dir<P: AsRef<Path>>(&self, path: P) -> Result<(), E>;
+}
+
+struct Public<'a> {
+    name: String,
+    cert: Cert<'a>,
+}
+
+impl<'a> PartialEq for Public<'a> {
+    fn eq(&self, other: &Public<'a>) -> bool {
+        use openssl::crypto::hash::Type;
+        let typ = Type::SHA384;
+        self.name == other.name &&
+            self.cert.fingerprint(typ) == other.cert.fingerprint(typ)
+    }
+}
+
+impl<'a> fmt::Debug for Public<'a> {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        write!(fmt, "Public({:?}, <cert>)", self.name)
+    }
+}
+
+struct Private<'a> {
+    public: Public<'a>,
+    key: Key,
+}
+
+impl<'a> fmt::Debug for Private<'a> {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        write!(fmt, "Private({:?}, <key>)", self.public)
+    }
+}
+
+impl<'a> PartialEq for Private<'a> {
+    fn eq(&self, other: &Private<'a>) -> bool {
+        use openssl::crypto::hash::Type;
+        let typ = Type::SHA384;
+        let dummy = b"dummy-eq-data";
+        self.public == other.public && {
+            let x = self.key.sign_with_hash(&dummy[..], typ);
+            other.key.verify_with_hash(&x, &dummy[..], typ)
+        }
+    }
+}
+
+impl<'a> Public<'a> {
+    fn from(name: String, cert: Cert<'a>) -> Self {
+        Public {
+            name: name,
+            cert: cert
+        }
+    }
+}
+
+impl<'a> DirStore for Public<'a> {
+    type E = E;
+
+    fn from_dir<P: AsRef<Path>>(p: P) -> Result<Self, E> {
+        let name = try!(
+            name_load(p.as_ref().join("name"))
+            .map_err(|e| E::NameLoad(e))
+        );
+        let mut fcert = try!(
+            fs::File::open(p.as_ref().join("cert.pem"))
+            .map_err(|e| E::OpenCert(e))
+        );
+
+        let cert = try!(
+            Cert::from_pem(&mut fcert)
+            .map_err(|e| E::LoadCert(e))
+        );
+
+        Ok(Public {
+            name: name,
+            cert: cert,
+        })
+    }
+
+    fn to_dir<P: AsRef<Path>>(&self, p: P) -> Result<(), E> {
+        let mut f = try!(
+            fs::File::create(p.as_ref().join("name"))
+            .map_err(|e| E::CreateName(e))
+        );
+
+        try!(
+            f.write_all(self.name.as_bytes())
+            .map_err(|e| E::StoreName(e))
+        );
+
+        let mut f = try!(
+            fs::File::create(p.as_ref().join("cert.pem"))
+            .map_err(|e| E::CreateCert(e))
+        );
+
+        self.cert.write_pem(&mut f)
+            .map_err(|e| E::StoreCert(e))
+    }
+}
+
+impl<'a> Private<'a> {
+    fn from(name: String, cert: Cert<'a>, key: Key) -> Self {
+        Private {
+            public: Public::from(name, cert),
+            key: key,
+        }
+    }
+}
+
+impl<'a> DirStore for Private<'a> {
+    type E = E;
+
+    fn from_dir<P: AsRef<Path>>(p: P) -> Result<Self, E> {
+        let public = try!(Public::from_dir(&p));
+        let mut f = try!(
+            fs::File::open(p.as_ref().join("cert.key"))
+            .map_err(|e| E::OpenKey(e))
+        );
+        let key = try!(
+            Key::private_key_from_pem(&mut f)
+            .map_err(|e| E::LoadKey(e))
+        );
+        Ok(Private {
+            public: public,
+            key: key,
+        })
+    }
+
+    fn to_dir<P: AsRef<Path>>(&self, p: P) -> Result<(), E> {
+        try!(self.public.to_dir(&p));
+        let mut f = try!(
+            fs::File::create(p.as_ref().join("cert.key"))
+            .map_err(|e| E::CreateKey(e))
+        );
+
+        self.key.write_pem(&mut f)
+            .map_err(|e| E::StoreKey(e))
+    }
+}
+
+/// Using the filesystem, keep track of a @T which can be store to and retrieved from a directory
+/// in the file system.
+///
+/// This code is shared between Client & Server portions, but using it directly (with @T=@Public)
+/// will get the Client-kind interface, which we document below.
+///
 /// Client side portion, tracks certificates (which include public keys)
 ///
 /// Tracks multiple 'hosts' identified by unique ids (typically hostnames). Each 'host' has
 /// a ordered series of 'cert-entry's (we probably can prune all but the latest). Each
-/// 'cert-entry' contains a 'ident' (generally, a hostname prefixed with a number) and a
+/// 'cert-entry' contains a 'name' (generally, a hostname prefixed with a number) and a
 /// certificate.
 ///
 /// File system layout looks like:
-/// <root>/tofu-store/cert/v<version>/<host>/<serial>.d/cert.pem
-/// <root>/tofu-store/cert/v<version>/<host>/<serial>.d/ident
+/// <root>/tofu-store/v<version>/<host>/<serial>.d/cert.pem
+/// <root>/tofu-store/v<version>/<host>/<serial>.d/name
 ///
 /// To summarize:
 ///  - client controls <root>, <host>, and <serial>
-///  - server provides contents of 'cert' and 'ident'
+///  - server provides contents of 'cert' and 'name'
 ///
 /// Right now we presume that no other processes are modifying a single CertStore at the same time,
 /// but in the future we could add file locking to address this.
-pub struct CertStore {
-    root: PathBuf,
+pub struct CertStore<T: DirStore> {
+    pub root: PathBuf,
+    pub entry: PhantomData<T>,
 }
 
-impl CertStore {
+impl<T: DirStore> CertStore<T> {
     pub fn version() -> u64 {
         0
     }
@@ -129,10 +347,9 @@ impl CertStore {
          */
 
         path.push("tofu-store");
-        path.push("cert");
-        path.push(format!("v{}", CertStore::version()));
+        path.push(format!("v{}", Self::version()));
         try!(fs::create_dir_all(&path));
-        Ok(CertStore { root: path })
+        Ok(CertStore { root: path, entry: PhantomData })
     }
 
     /**
@@ -171,32 +388,43 @@ impl CertStore {
     }
 
     /**
-     * return the ident & cert of the last entry
+     * return the name & cert of the last entry
      *
      * FIXME: we really want an iterator that starts at the last entry and proceeds backwards
      */
-    pub fn latest(&self, host: &str) -> Result<Option<(Vec<u8>, Cert, u64)>, io::Error> {
-        let h = try!(self.latest_entry(host));
+    pub fn latest(&self, host: &str) -> Result<Option<(T, u64)>, E> {
+        let h = try!(
+            self.latest_entry(host)
+            .map_err(|e| E::LatestEntry(e))
+        );
         match h {
             Some(ref h) => {
                 let p = h.dirent.path();
-                let mut ident = vec![];
-                try!(try!(fs::File::open(p.join("ident"))).read_to_end(&mut ident));
-                // FIXME: return error
-                let cert = openssl::x509::X509::from_pem(&mut try!(fs::File::open(p.join("cert.pem")))).unwrap();
-                Ok(Some((ident, cert, h.serial)))
+                let v = try!(
+                    T::from_dir(p)
+                    .map_err(|e| E::FromDir(Box::new(e)))
+                );
+                Ok(Some((v, h.serial)))
             },
             None => Ok(None)
         }
+    }
+
+    pub fn entries_for_host(&self, host: &str) -> Result<SerialDirIter, io::Error> {
+        let p = self.root.join(host);
+        Ok(SerialDirIter::new(try!(fs::read_dir(p))))
     }
 
     fn serial(u: u64) -> String {
         format!("{:08}.d", u)
     }
 
-    pub fn insert(&self, host: &str, ident: &[u8], cert: &Cert) -> Result<u64, io::Error> {
-
-        let h = try!(self.latest_entry(host));
+    pub fn insert(&self, host: &str, entry: &T) -> Result<u64, E>
+    {
+        let h = try!(
+            self.latest_entry(host)
+            .map_err(|e| E::LatestEntry(e))
+        );
         let s = match h {
             Some(ref d) => d.serial + 1,
             None => 0
@@ -204,14 +432,14 @@ impl CertStore {
         let next_dir = Self::serial(s);
 
         let mut p = self.root.join(host);
-        p.push(next_dir);
-        try!(fs::create_dir_all(&p));
-
         // FIXME: write to temp dir first and fsync before moving dir into place
-        try!(try!(fs::File::create(p.join("ident"))).write_all(ident));
+        p.push(next_dir);
 
-        // FIXME: proper error returns
-        cert.write_pem(&mut try!(fs::File::create(p.join("cert.pem")))).unwrap();
+        try!(
+            fs::create_dir_all(&p)
+            .map_err(|e| E::CreateDir(p.clone(), e))
+        );
+        try!(entry.to_dir(p));
         Ok(s)
     }
 }
@@ -231,8 +459,6 @@ fn some_cert(name: String) -> (openssl::x509::X509<'static>, openssl::crypto::pk
 
 #[test]
 fn test_certstore () {
-    use openssl::crypto::hash::Type;
-
     env_logger::init().unwrap();
 
     let cert = some_cert("tofu-1".to_owned());
@@ -240,17 +466,17 @@ fn test_certstore () {
     let d = td.path().to_owned();
 
     let name = "tofu-test-host";
-    let id = b"tofu-test-host-ident";
+    let id = "tofu-test-host-name";
+    let public = Public::from(id.to_owned(), cert.0);
 
     {
         let c = CertStore::from(d.clone()).expect("constructing cert store failed");
-        c.insert(name, id, &cert.0).expect("insert failed");
+        c.insert(name, &public).expect("insert failed");
         let x = c.latest(name).expect("error retreving latest cert after insert");
         let x = x.expect("no cert found after insert");
 
-        assert_eq!(x.0, id);
-        assert_eq!(x.1.fingerprint(Type::SHA256), cert.0.fingerprint(Type::SHA256));
-        assert_eq!(x.2, 0);
+        assert_eq!(x.0, public);
+        assert_eq!(x.1, 0);
     }
 
     {
@@ -258,39 +484,115 @@ fn test_certstore () {
         let x = c.latest(name).expect("error retreving latest cert after re-open");
         let x = x.expect("no cert found after re-open");
 
-        assert_eq!(x.0, id);
-        assert_eq!(x.1.fingerprint(Type::SHA256), cert.0.fingerprint(Type::SHA256));
-        assert_eq!(x.2, 0);
+        assert_eq!(x.0, public);
+        assert_eq!(x.1, 0);
 
         let cert = some_cert("tofu-2".to_owned());
-        c.insert(name, id, &cert.0).expect("insert 2 failed");
+        let p2 = Public::from(id.to_owned(), cert.0);
+        c.insert(name, &p2).expect("insert 2 failed");
 
         let x = c.latest(name).expect("error getting latest after inserting second");
         let x = x.expect("no cert found after inserting second");
 
-        assert_eq!(x.0, id);
-        assert_eq!(x.1.fingerprint(Type::SHA256), cert.0.fingerprint(Type::SHA256));
-        assert_eq!(x.2, 1);
+        assert_eq!(x.0, p2);
+        assert_eq!(x.1, 1);
     }
 
     // TODO: check actual directory shape
 
 }
 
-/// Server side portion, tracks private keys
+/// XXX: shape is identical to CertStore. cert.pem just also includes a private key
+///
+/// Server side portion, tracks private keys for multiple hosts
 ///
 /// Filesystem layout:
-///  <root>/tofu-store/key/v<version>/<host>/<ident>/cert.pem
+///  <root>/tofu-store/v<version>/<host>/<serial>.d/cert.pem
+///  <root>/tofu-store/v<version>/<host>/<serial>.d/name
 ///
-pub struct KeyStore {
-    root: PathBuf,
-    host: Vec<u8>,
+/// <host> is a generic name to refer to a single host with a collection of certs.
+/// <name> refers to a specific single cert for that <host>. In our usage, it is a hostname.
+///
+/// Note that hostnames are restricted to ASCII by SNI in https://tools.ietf.org/html/rfc6066, so
+/// we restrict @name to String without losing expresivness.
+///
+/// Note that the hostname is typically also included in the cert.pem.
+/// cert.pem hostname _must_ be ignored. @name file contents must be used.
+///
+///
+
+pub type CtxCreate = Fn(&Cert, &Key) -> Result<SslContext, SslError>;
+
+pub struct KeyStore<'a> {
+    inner: CertStore<Private<'a>>,
+    host: String,
+    ctxs: HashMap<String, Rc<SslContext>>,
+    ctx_create: &'a CtxCreate,
+
+    default_ctx: Option<(Rc<SslContext>, u64)>,
+
+    /* TODO: add cert_gen functionality */
 }
 
-pub struct KeyStoreIter;
+impl<'a> KeyStore<'a> {
+    fn add_entry(&mut self, entry: Result<SerialDirItem, io::Error>) -> Result<(String, Rc<SslContext>), E> {
+            let entry = try!(entry.map_err(|e| E::Entry(self.inner.root.join(&self.host), e)));
 
-impl KeyStore {
-    pub fn new(mut path: PathBuf, hostname: Vec<u8>) -> Result<Self, io::Error> {
+            let n = entry.dirent.path();
+
+            let v = try!(Private::from_dir(n));
+
+            let ctx = try!(
+                (self.ctx_create)(&v.public.cert, &v.key)
+                .map_err(|e| E::CtxCreate(e))
+            );
+
+            let ctx_rc = Rc::new(ctx);
+            if !self.default_ctx.is_some() || { self.default_ctx.as_ref().unwrap().1 < entry.serial } {
+                self.default_ctx = Some((ctx_rc.clone(), entry.serial));
+            }
+
+            Ok((v.public.name, ctx_rc))
+    }
+
+    pub fn insert(&mut self, name: String, cert: Cert, key: Key) -> Result<u64, E>
+    {
+        let v = Private::from(name, cert, key);
+        let new_idx = try!(
+            self.inner.insert(&self.host, &v)
+            .map_err(|e| E::Insert(Box::new(e)))
+        );
+        let new_ctx = Rc::new(try!(
+                (self.ctx_create)(&v.public.cert, &v.key)
+                .map_err(|e| E::CtxCreate(e))
+        ));
+        self.ctxs.insert(v.public.name, new_ctx.clone());
+        self.default_ctx = Some((new_ctx, new_idx));
+        Ok(new_idx)
+    }
+
+    fn init_ctxs(&mut self) -> io::Result<()>
+    {
+        /* create contexts for all certs that already exist */
+        for entry in try!(self.inner.entries_for_host(&self.host)) {
+            let (name, ctx) = match self.add_entry(entry) {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!("Failed to add entry to KeyStore: {:?}", e);
+                    continue;
+                }
+            };
+
+            /* TODO: ensure names are unique */
+            self.ctxs.insert(name, ctx);
+        }
+
+        Ok(())
+    }
+
+    pub fn from(path: PathBuf, host: String, ctx_create: &'a CtxCreate) -> Result<Self, E>
+    {
+        let inner = try!(CertStore::from(path.clone()).map_err(|e| E::CertStoreCreate(path.clone(), e)));
         /*
          * TODO
          * Probe for a key store, if none exists, create it.
@@ -299,24 +601,59 @@ impl KeyStore {
          * If our desired version exists, use it.
          */
 
-        path.push("tofu-store");
-        path.push("key");
-        path.push(format!("v{}", CertStore::version()));
-        try!(fs::create_dir_all(&path));
-        Ok(KeyStore { root: path, host: hostname })
+        /* TODO: watch (via inotify) the directory for the addition of new certificates */
+        /* TODO: ensure that at least a single context exists */
+        /* TODO: return a default context */
+
+        let mut ks = KeyStore {
+            inner: inner,
+            host: host,
+            ctxs : HashMap::new(),
+            ctx_create: ctx_create,
+            default_ctx: None,
+        };
+
+        match ks.init_ctxs() {
+            Err(e) => {
+                if e.kind() != io::ErrorKind::NotFound {
+                    return Err(E::InitCtxs(e));
+                }
+            },
+            Ok(_) => {}
+        }
+
+        Ok(ks)
     }
 
-    pub fn iter(&self) -> Result<KeyStoreIter, io::Error> {
-        unimplemented!();
+    pub fn default_ctx(&self) -> Option<Rc<SslContext>> {
+        self.default_ctx.as_ref().map(|v| v.0.clone())
     }
 
-    pub fn new_key(&self) -> Result<(Cert, u64), io::Error> {
-        unimplemented!();
+    pub fn name_to_ctx(&self, name: &str) -> Option<Rc<SslContext>> {
+        match self.ctxs.get(name) {
+            Some(v) => Some(v.clone()),
+            None => None
+        }
     }
 }
 
 #[test]
 fn test_keystore() {
+    use openssl::ssl;
     let cert = some_cert("tofu-1".to_owned());
     let td = TempDir::new("tofu-test").unwrap();
+
+    let host = "host-for-keystore";
+    fn ctx_create (cert: &Cert, key: &Key) -> Result<SslContext, SslError> {
+        let mut c = try!(ssl::SslContext::new(ssl::SslMethod::Sslv23));
+        try!(c.set_certificate(cert));
+        try!(c.set_private_key(key));
+        Ok(c)
+    }
+    let v = &ctx_create;
+    let mut ks = KeyStore::from(td.path().to_owned(), host.to_owned(), v).expect("could not construct keystore");
+
+    ks.insert("boop".to_owned(), cert.0, cert.1).expect("failed to insert certificate");
+
+    ks.default_ctx().expect("no context found after insert");
 }
