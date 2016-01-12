@@ -25,16 +25,18 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 
 #[derive(Debug)]
-pub enum E {
+pub enum E<DirStoreE> {
     /* CertStore base operations */
     BasePathCreate(PathBuf, io::Error),
     CreateDir(PathBuf, io::Error),
     ReadDir(PathBuf, io::Error),
     Entry(PathBuf, io::Error),
     LatestEntry(io::Error),
-    // TODO: this should be parameterized on the associated type of DirStore
-    Insert(Box<E>),
-    FromDir(Box<E>),
+
+
+    Insert(DirStoreE),
+    FromDir(DirStoreE),
+    ToDir(DirStoreE),
 
     /* KeyStore: init */
     CertStoreCreate(PathBuf, io::Error),
@@ -42,27 +44,6 @@ pub enum E {
     /* Keystore: ctx related */
     CtxCreate(SslError),
     InitCtxs(io::Error),
-
-    /* DirStore for Public */
-    /*  from_dir */
-    NameLoad(err::NameLoad),
-    LoadCert(SslError),
-    OpenCert(io::Error),
-
-    /*  to_dir */
-    CreateName(io::Error),
-    StoreName(io::Error),
-    CreateCert(io::Error),
-    StoreCert(SslError),
-
-    /* DirStore for Private */
-    /*  from_dir */
-    OpenKey(io::Error),
-    LoadKey(SslError),
-
-    /*  to_dir */
-    CreateKey(io::Error),
-    StoreKey(SslError),
 }
 
 pub struct SerialDirItem {
@@ -144,11 +125,43 @@ impl Iterator for SerialDirIter {
 pub mod err {
     use std::io;
     use std::string::FromUtf8Error;
+    use super::SslError;
+
     #[derive(Debug)]
     pub enum NameLoad {
         Open(io::Error),
         Read(io::Error),
         Convert(FromUtf8Error),
+    }
+
+    /* DirStore for Private */
+    #[derive(Debug)]
+    pub enum Private {
+        /*  from_dir */
+        OpenKey(io::Error),
+        LoadKey(SslError),
+
+        /*  to_dir */
+        CreateKey(io::Error),
+        StoreKey(SslError),
+
+        /* both */
+        Public(Public),
+    }
+
+    /* DirStore for Public */
+    #[derive(Debug)]
+    pub enum Public {
+        /*  from_dir */
+        NameLoad(NameLoad),
+        LoadCert(SslError),
+        OpenCert(io::Error),
+
+        /*  to_dir */
+        CreateName(io::Error),
+        StoreName(io::Error),
+        CreateCert(io::Error),
+        StoreCert(SslError),
     }
 }
 
@@ -162,9 +175,9 @@ fn name_load<P: AsRef<Path>>(p: P) -> Result<String, err::NameLoad>
 
 pub trait DirStore {
     type E;
-    fn from_dir<P: AsRef<Path>>(path: P) -> Result<Self, E>
+    fn from_dir<P: AsRef<Path>>(path: P) -> Result<Self, <Self as DirStore>::E>
         where Self: Sized;
-    fn to_dir<P: AsRef<Path>>(&self, path: P) -> Result<(), E>;
+    fn to_dir<P: AsRef<Path>>(&self, path: P) -> Result<(), <Self as DirStore>::E>;
 }
 
 struct Public<'a> {
@@ -220,21 +233,21 @@ impl<'a> Public<'a> {
 }
 
 impl<'a> DirStore for Public<'a> {
-    type E = E;
+    type E = err::Public;
 
-    fn from_dir<P: AsRef<Path>>(p: P) -> Result<Self, E> {
+    fn from_dir<P: AsRef<Path>>(p: P) -> Result<Self, Self::E> {
         let name = try!(
             name_load(p.as_ref().join("name"))
-            .map_err(|e| E::NameLoad(e))
+            .map_err(|e| err::Public::NameLoad(e))
         );
         let mut fcert = try!(
             fs::File::open(p.as_ref().join("cert.pem"))
-            .map_err(|e| E::OpenCert(e))
+            .map_err(|e| err::Public::OpenCert(e))
         );
 
         let cert = try!(
             Cert::from_pem(&mut fcert)
-            .map_err(|e| E::LoadCert(e))
+            .map_err(|e| err::Public::LoadCert(e))
         );
 
         Ok(Public {
@@ -243,24 +256,24 @@ impl<'a> DirStore for Public<'a> {
         })
     }
 
-    fn to_dir<P: AsRef<Path>>(&self, p: P) -> Result<(), E> {
+    fn to_dir<P: AsRef<Path>>(&self, p: P) -> Result<(), Self::E> {
         let mut f = try!(
             fs::File::create(p.as_ref().join("name"))
-            .map_err(|e| E::CreateName(e))
+            .map_err(|e| err::Public::CreateName(e))
         );
 
         try!(
             f.write_all(self.name.as_bytes())
-            .map_err(|e| E::StoreName(e))
+            .map_err(|e| err::Public::StoreName(e))
         );
 
         let mut f = try!(
             fs::File::create(p.as_ref().join("cert.pem"))
-            .map_err(|e| E::CreateCert(e))
+            .map_err(|e| err::Public::CreateCert(e))
         );
 
         self.cert.write_pem(&mut f)
-            .map_err(|e| E::StoreCert(e))
+            .map_err(|e| err::Public::StoreCert(e))
     }
 }
 
@@ -274,17 +287,20 @@ impl<'a> Private<'a> {
 }
 
 impl<'a> DirStore for Private<'a> {
-    type E = E;
+    type E = err::Private;
 
-    fn from_dir<P: AsRef<Path>>(p: P) -> Result<Self, E> {
-        let public = try!(Public::from_dir(&p));
+    fn from_dir<P: AsRef<Path>>(p: P) -> Result<Self, Self::E> {
+        let public = try!(
+            Public::from_dir(&p)
+            .map_err(|e| err::Private::Public(e))
+        );
         let mut f = try!(
             fs::File::open(p.as_ref().join("cert.key"))
-            .map_err(|e| E::OpenKey(e))
+            .map_err(|e| err::Private::OpenKey(e))
         );
         let key = try!(
             Key::private_key_from_pem(&mut f)
-            .map_err(|e| E::LoadKey(e))
+            .map_err(|e| err::Private::LoadKey(e))
         );
         Ok(Private {
             public: public,
@@ -292,15 +308,18 @@ impl<'a> DirStore for Private<'a> {
         })
     }
 
-    fn to_dir<P: AsRef<Path>>(&self, p: P) -> Result<(), E> {
-        try!(self.public.to_dir(&p));
+    fn to_dir<P: AsRef<Path>>(&self, p: P) -> Result<(), Self::E> {
+        try!(
+            self.public.to_dir(&p)
+            .map_err(|e| err::Private::Public(e))
+        );
         let mut f = try!(
             fs::File::create(p.as_ref().join("cert.key"))
-            .map_err(|e| E::CreateKey(e))
+            .map_err(|e| err::Private::CreateKey(e))
         );
 
         self.key.write_pem(&mut f)
-            .map_err(|e| E::StoreKey(e))
+            .map_err(|e| err::Private::StoreKey(e))
     }
 }
 
@@ -392,7 +411,7 @@ impl<T: DirStore> CertStore<T> {
      *
      * FIXME: we really want an iterator that starts at the last entry and proceeds backwards
      */
-    pub fn latest(&self, host: &str) -> Result<Option<(T, u64)>, E> {
+    pub fn latest(&self, host: &str) -> Result<Option<(T, u64)>, E<T::E>> {
         let h = try!(
             self.latest_entry(host)
             .map_err(|e| E::LatestEntry(e))
@@ -402,7 +421,7 @@ impl<T: DirStore> CertStore<T> {
                 let p = h.dirent.path();
                 let v = try!(
                     T::from_dir(p)
-                    .map_err(|e| E::FromDir(Box::new(e)))
+                    .map_err(|e| E::FromDir(e))
                 );
                 Ok(Some((v, h.serial)))
             },
@@ -419,7 +438,7 @@ impl<T: DirStore> CertStore<T> {
         format!("{:08}.d", u)
     }
 
-    pub fn insert(&self, host: &str, entry: &T) -> Result<u64, E>
+    pub fn insert(&self, host: &str, entry: &T) -> Result<u64, E<T::E>>
     {
         let h = try!(
             self.latest_entry(host)
@@ -439,7 +458,10 @@ impl<T: DirStore> CertStore<T> {
             fs::create_dir_all(&p)
             .map_err(|e| E::CreateDir(p.clone(), e))
         );
-        try!(entry.to_dir(p));
+        try!(
+            entry.to_dir(p)
+            .map_err(|e| E::ToDir(e))
+        );
         Ok(s)
     }
 }
@@ -455,7 +477,6 @@ fn some_cert(name: String) -> (openssl::x509::X509<'static>, openssl::crypto::pk
         .generate()
         .unwrap()
 }
-
 
 #[test]
 fn test_certstore () {
@@ -523,6 +544,8 @@ fn test_certstore () {
 
 pub type CtxCreate = Fn(&Cert, &Key) -> Result<SslContext, SslError>;
 
+pub type KeyStoreErr<'a> = E<<Private<'a> as DirStore>::E>;
+
 pub struct KeyStore<'a> {
     inner: CertStore<Private<'a>>,
     host: String,
@@ -535,12 +558,15 @@ pub struct KeyStore<'a> {
 }
 
 impl<'a> KeyStore<'a> {
-    fn add_entry(&mut self, entry: Result<SerialDirItem, io::Error>) -> Result<(String, Rc<SslContext>), E> {
+    fn add_entry(&mut self, entry: Result<SerialDirItem, io::Error>) -> Result<(String, Rc<SslContext>), KeyStoreErr<'a>> {
             let entry = try!(entry.map_err(|e| E::Entry(self.inner.root.join(&self.host), e)));
 
             let n = entry.dirent.path();
 
-            let v = try!(Private::from_dir(n));
+            let v = try!(
+                Private::from_dir(n)
+                .map_err(|e| E::FromDir(e))
+            );
 
             let ctx = try!(
                 (self.ctx_create)(&v.public.cert, &v.key)
@@ -555,13 +581,10 @@ impl<'a> KeyStore<'a> {
             Ok((v.public.name, ctx_rc))
     }
 
-    pub fn insert(&mut self, name: String, cert: Cert, key: Key) -> Result<u64, E>
+    pub fn insert(&mut self, name: String, cert: Cert, key: Key) -> Result<u64, KeyStoreErr<'a>>
     {
         let v = Private::from(name, cert, key);
-        let new_idx = try!(
-            self.inner.insert(&self.host, &v)
-            .map_err(|e| E::Insert(Box::new(e)))
-        );
+        let new_idx = try!(self.inner.insert(&self.host, &v));
         let new_ctx = Rc::new(try!(
                 (self.ctx_create)(&v.public.cert, &v.key)
                 .map_err(|e| E::CtxCreate(e))
@@ -590,7 +613,7 @@ impl<'a> KeyStore<'a> {
         Ok(())
     }
 
-    pub fn from(path: PathBuf, host: String, ctx_create: &'a CtxCreate) -> Result<Self, E>
+    pub fn from(path: PathBuf, host: String, ctx_create: &'a CtxCreate) -> Result<Self, KeyStoreErr<'a>>
     {
         let inner = try!(CertStore::from(path.clone()).map_err(|e| E::CertStoreCreate(path.clone(), e)));
         /*
