@@ -1,15 +1,13 @@
 #[macro_use]
 extern crate log;
 extern crate openssl;
-
-#[cfg(test)]
 extern crate tempdir;
+
 #[cfg(test)]
 extern crate env_logger;
 #[cfg(test)]
 extern crate odds;
 
-#[cfg(test)]
 use tempdir::TempDir;
 
 pub use openssl::x509::X509 as Cert;
@@ -34,7 +32,8 @@ pub enum E<DirStoreE> {
     ReadDir(PathBuf, io::Error),
     Entry(PathBuf, io::Error),
     LatestEntry(io::Error),
-
+    TempDir(io::Error),
+    Rename(io::Error),
 
     Insert(DirStoreE),
     FromDir(DirStoreE),
@@ -328,6 +327,14 @@ impl<'a> DirStore for Private<'a> {
 /// Using the filesystem, keep track of a @T which can be store to and retrieved from a directory
 /// in the file system.
 ///
+/// Right now we use fixed keys of "version", "host", and "serial".
+///
+/// File system layout looks like:
+/// <root>/tofu-store/v<version>/<host>/<serial>.d/<item-contents>
+///
+/// Where <item-contents> is determined by @T's @DirStore impl.
+///
+///
 /// This code is shared between Client & Server portions, but using it directly (with @T=@Public)
 /// will get the Client-kind interface, which we document below.
 ///
@@ -453,17 +460,29 @@ impl<T: DirStore> CertStore<T> {
         let next_dir = Self::serial(s);
 
         let mut p = self.root.join(host);
-        // FIXME: write to temp dir first and fsync before moving dir into place
-        p.push(next_dir);
 
         try!(
             fs::create_dir_all(&p)
             .map_err(|e| E::CreateDir(p.clone(), e))
         );
+
+        let t = try!(
+            TempDir::new_in(&p, &format!(".tmp.{}.", host))
+            .map_err(|e| E::TempDir(e))
+        );
+
         try!(
-            entry.to_dir(p)
+            entry.to_dir(t.path())
             .map_err(|e| E::ToDir(e))
         );
+
+        p.push(next_dir);
+        try!(
+            fs::rename(t.into_path(), p)
+            .map_err(|e| E::Rename(e))
+        );
+
+        /* FIXME: if rename fails, remove tempdir */
         Ok(s)
     }
 }
