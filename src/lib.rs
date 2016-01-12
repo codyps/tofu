@@ -30,7 +30,6 @@ pub enum E<DirStoreE> {
     BasePathCreate(PathBuf, io::Error),
     CreateDir(PathBuf, io::Error),
     ReadDir(PathBuf, io::Error),
-    Entry(PathBuf, io::Error),
     LatestEntry(io::Error),
     TempDir(io::Error),
     Rename(io::Error),
@@ -39,12 +38,6 @@ pub enum E<DirStoreE> {
     FromDir(DirStoreE),
     ToDir(DirStoreE),
 
-    /* KeyStore: init */
-    CertStoreCreate(PathBuf, io::Error),
-
-    /* Keystore: ctx related */
-    CtxCreate(SslError),
-    InitCtxs(io::Error),
 }
 
 pub struct SerialDirItem {
@@ -126,6 +119,7 @@ pub mod err {
     use std::io;
     use std::string::FromUtf8Error;
     use super::SslError;
+    use std::path::PathBuf;
 
     #[derive(Debug)]
     pub enum NameLoad {
@@ -163,7 +157,25 @@ pub mod err {
         CreateCert(io::Error),
         StoreCert(SslError),
     }
+
+    #[derive(Debug)]
+    pub enum KeyStoreErr<'a> {
+        /* init */
+        CertStoreCreate(PathBuf, io::Error),
+
+        /* ctx related */
+        CtxCreate(SslError),
+        InitCtxs(io::Error),
+
+        Entry(PathBuf, io::Error),
+
+        CertStore(super::E<<super::Private<'a> as super::DirStore>::E>),
+
+        FromDir(<super::Private<'a> as super::DirStore>::E),
+    }
 }
+
+pub use err::KeyStoreErr;
 
 fn name_load<P: AsRef<Path>>(p: P) -> Result<String, err::NameLoad>
 {
@@ -180,7 +192,7 @@ pub trait DirStore {
     fn to_dir<P: AsRef<Path>>(&self, path: P) -> Result<(), Self::E>;
 }
 
-struct Public<'a> {
+pub struct Public<'a> {
     name: String,
     cert: Cert<'a>,
 }
@@ -200,7 +212,7 @@ impl<'a> fmt::Debug for Public<'a> {
     }
 }
 
-struct Private<'a> {
+pub struct Private<'a> {
     public: Public<'a>,
     key: Key,
 }
@@ -564,8 +576,6 @@ fn test_certstore () {
 
 pub type CtxCreate = Fn(&Cert, &Key) -> Result<SslContext, SslError>;
 
-pub type KeyStoreErr<'a> = E<<Private<'a> as DirStore>::E>;
-
 pub struct KeyStore<'a> {
     inner: CertStore<Private<'a>>,
     host: String,
@@ -579,18 +589,20 @@ pub struct KeyStore<'a> {
 
 impl<'a> KeyStore<'a> {
     fn add_entry(&mut self, entry: Result<SerialDirItem, io::Error>) -> Result<(String, Rc<SslContext>), KeyStoreErr<'a>> {
-            let entry = try!(entry.map_err(|e| E::Entry(self.inner.root.join(&self.host), e)));
+            let entry = try!(
+                entry.map_err(|e| KeyStoreErr::Entry(self.inner.root.join(&self.host), e))
+            );
 
             let n = entry.dirent.path();
 
             let v = try!(
                 Private::from_dir(n)
-                .map_err(|e| E::FromDir(e))
+                .map_err(|e| KeyStoreErr::FromDir(e))
             );
 
             let ctx = try!(
                 (self.ctx_create)(&v.public.cert, &v.key)
-                .map_err(|e| E::CtxCreate(e))
+                .map_err(|e| KeyStoreErr::CtxCreate(e))
             );
 
             let ctx_rc = Rc::new(ctx);
@@ -604,10 +616,13 @@ impl<'a> KeyStore<'a> {
     pub fn insert(&mut self, name: String, cert: Cert, key: Key) -> Result<u64, KeyStoreErr<'a>>
     {
         let v = Private::from(name, cert, key);
-        let new_idx = try!(self.inner.insert(&self.host, &v));
+        let new_idx = try!(
+            self.inner.insert(&self.host, &v)
+            .map_err(|e| KeyStoreErr::CertStore(e))
+        );
         let new_ctx = Rc::new(try!(
                 (self.ctx_create)(&v.public.cert, &v.key)
-                .map_err(|e| E::CtxCreate(e))
+                .map_err(|e| KeyStoreErr::CtxCreate(e))
         ));
         self.ctxs.insert(v.public.name, new_ctx.clone());
         self.default_ctx = Some((new_ctx, new_idx));
@@ -635,7 +650,7 @@ impl<'a> KeyStore<'a> {
 
     pub fn from(path: PathBuf, host: String, ctx_create: &'a CtxCreate) -> Result<Self, KeyStoreErr<'a>>
     {
-        let inner = try!(CertStore::from(path.clone()).map_err(|e| E::CertStoreCreate(path.clone(), e)));
+        let inner = try!(CertStore::from(path.clone()).map_err(|e| KeyStoreErr::CertStoreCreate(path.clone(), e)));
         /*
          * TODO
          * Probe for a key store, if none exists, create it.
@@ -659,7 +674,7 @@ impl<'a> KeyStore<'a> {
         match ks.init_ctxs() {
             Err(e) => {
                 if e.kind() != io::ErrorKind::NotFound {
-                    return Err(E::InitCtxs(e));
+                    return Err(KeyStoreErr::InitCtxs(e));
                 }
             },
             Ok(_) => {}
