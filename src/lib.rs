@@ -52,18 +52,17 @@ pub struct SerialDirItem {
     pub serial: u64,
 }
 
-pub struct SerialDirIter {
-    pub inner: fs::ReadDir,
+pub struct SerialDirIter<T: Iterator<Item=io::Result<fs::DirEntry>>> {
+    pub inner: T,
 }
 
-impl SerialDirIter {
-    /* TODO: generalize over any iterator returning the right Item */
-    pub fn new(inner: fs::ReadDir) -> SerialDirIter {
+impl<T: Iterator<Item=io::Result<fs::DirEntry>>> SerialDirIter<T> {
+    pub fn from(inner: T) -> SerialDirIter<T> {
         SerialDirIter { inner: inner }
     }
 }
 
-impl Iterator for SerialDirIter {
+impl<T: Iterator<Item=io::Result<fs::DirEntry>>> Iterator for SerialDirIter<T> {
     type Item = io::Result<SerialDirItem>;
 
     /*
@@ -398,7 +397,7 @@ impl<T: DirStore> CertStore<T> {
             },
         };
 
-        for me in SerialDirIter::new(rd) {
+        for me in SerialDirIter::from(rd) {
             let e = try!(me);
             h = match h {
                 None => Some(e),
@@ -438,9 +437,9 @@ impl<T: DirStore> CertStore<T> {
         }
     }
 
-    pub fn entries_for_host(&self, host: &str) -> Result<SerialDirIter, io::Error> {
+    pub fn entries_for_host(&self, host: &str) -> Result<SerialDirIter<fs::ReadDir>, io::Error> {
         let p = self.root.join(host);
-        Ok(SerialDirIter::new(try!(fs::read_dir(p))))
+        Ok(SerialDirIter::from(try!(fs::read_dir(p))))
     }
 
     fn serial(u: u64) -> String {
@@ -707,5 +706,5 @@ fn test_keystore() {
 
     /* openssl doesn't provide us with a direct way of determining equality, so just do pointer
      * comparison for now */
-    assert!(!odds::ptr_eq(ctx1.deref(), ctx2.deref()))
+    assert!(!odds::ptr_eq(ctx1.deref(), ctx2.deref()));
 }
