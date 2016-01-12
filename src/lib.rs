@@ -6,6 +6,8 @@ extern crate openssl;
 extern crate tempdir;
 #[cfg(test)]
 extern crate env_logger;
+#[cfg(test)]
+extern crate odds;
 
 #[cfg(test)]
 use tempdir::TempDir;
@@ -662,6 +664,7 @@ impl<'a> KeyStore<'a> {
 
 #[test]
 fn test_keystore() {
+    use std::ops::Deref;
     use openssl::ssl;
     let cert = some_cert("tofu-1".to_owned());
     let td = TempDir::new("tofu-test").unwrap();
@@ -677,6 +680,13 @@ fn test_keystore() {
     let mut ks = KeyStore::from(td.path().to_owned(), host.to_owned(), v).expect("could not construct keystore");
 
     ks.insert("boop".to_owned(), cert.0, cert.1).expect("failed to insert certificate");
+    let ctx1 = ks.default_ctx().expect("no context found after insert");
 
-    ks.default_ctx().expect("no context found after insert");
+    let cert = some_cert("tofu-2".to_owned());
+    ks.insert("boop2".to_owned(), cert.0, cert.1).expect("failed to insert certificate");
+    let ctx2 = ks.default_ctx().expect("no context found after insert");
+
+    /* openssl doesn't provide us with a direct way of determining equality, so just do pointer
+     * comparison for now */
+    assert!(!odds::ptr_eq(ctx1.deref(), ctx2.deref()))
 }
