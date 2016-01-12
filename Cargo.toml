@@ -1,9 +1,10 @@
 [package]
 name = "tofu"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["Cody P Schafer <dev@codyps.com>"]
 description = "Trust On First Use helper code"
 license = "AGPL-3.0"
+repository = "https://github.com/jmesmon/tofu.git"
 
 [dependencies]
 log = "0.*"

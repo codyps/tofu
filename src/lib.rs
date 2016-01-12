@@ -175,9 +175,9 @@ fn name_load<P: AsRef<Path>>(p: P) -> Result<String, err::NameLoad>
 
 pub trait DirStore {
     type E;
-    fn from_dir<P: AsRef<Path>>(path: P) -> Result<Self, <Self as DirStore>::E>
+    fn from_dir<P: AsRef<Path>>(path: P) -> Result<Self, Self::E>
         where Self: Sized;
-    fn to_dir<P: AsRef<Path>>(&self, path: P) -> Result<(), <Self as DirStore>::E>;
+    fn to_dir<P: AsRef<Path>>(&self, path: P) -> Result<(), Self::E>;
 }
 
 struct Public<'a> {
