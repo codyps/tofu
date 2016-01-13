@@ -722,4 +722,11 @@ fn test_keystore() {
     /* openssl doesn't provide us with a direct way of determining equality, so just do pointer
      * comparison for now */
     assert!(!odds::ptr_eq(ctx1.deref(), ctx2.deref()));
+
+    {
+        let ks = KeyStore::from(td.path().to_owned(), host.to_owned(), v).expect("could not construct keystore");
+        let _ctx2_b = ks.default_ctx().expect("failed to reload generated keystore");
+
+        /* TODO: assert_eq!(ctx2, ctx2_b); */
+    }
 }
