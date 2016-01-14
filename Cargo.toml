@@ -1,6 +1,6 @@
 [package]
 name = "tofu"
-version = "0.1.4"
+version = "0.1.5"
 authors = ["Cody P Schafer <dev@codyps.com>"]
 description = "Trust On First Use helper code"
 license = "AGPL-3.0"
