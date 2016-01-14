@@ -17,7 +17,7 @@ pub use openssl::ssl::SslContext;
 pub use openssl::ssl::error::SslError;
 
 use std::fmt;
-use std::rc::Rc;
+use std::sync::Arc;
 use std::{fs, io};
 use std::io::{Read, Write};
 use std::path::{PathBuf, Path};
@@ -575,6 +575,11 @@ fn test_certstore () {
 ///
 
 pub type CtxCreate = Fn(&Cert, &Key) -> Result<SslContext, SslError>;
+
+/* TODO: once from_for_ptrs lands in 1.6.0, switch to parameterizing KeyStore on
+ * Rc: From<SslContext> + Clone
+ */
+pub type Rc<T> = std::sync::Arc<T>;
 
 pub struct KeyStore<'a> {
     inner: CertStore<Private<'a>>,
