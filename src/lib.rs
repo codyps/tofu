@@ -585,7 +585,7 @@ pub struct KeyStore<'a> {
     inner: CertStore<Private<'a>>,
     host: String,
     ctxs: HashMap<String, Rc<SslContext>>,
-    ctx_create: &'a CtxCreate,
+    ctx_create: Option<&'a CtxCreate>,
 
     default_ctx: Option<(Rc<SslContext>, u64)>,
 
@@ -606,7 +606,7 @@ impl<'a> KeyStore<'a> {
             );
 
             let ctx = try!(
-                (self.ctx_create)(&v.public.cert, &v.key)
+                self.ctx_create.unwrap()(&v.public.cert, &v.key)
                 .map_err(|e| KeyStoreErr::CtxCreate(e))
             );
 
@@ -626,7 +626,7 @@ impl<'a> KeyStore<'a> {
             .map_err(|e| KeyStoreErr::CertStore(e))
         );
         let new_ctx = Rc::new(try!(
-                (self.ctx_create)(&v.public.cert, &v.key)
+                self.ctx_create.unwrap()(&v.public.cert, &v.key)
                 .map_err(|e| KeyStoreErr::CtxCreate(e))
         ));
         self.ctxs.insert(v.public.name, new_ctx.clone());
@@ -653,7 +653,8 @@ impl<'a> KeyStore<'a> {
         Ok(())
     }
 
-    pub fn from(path: PathBuf, host: String, ctx_create: &'a CtxCreate) -> Result<Self, KeyStoreErr<'a>>
+    pub fn from(path: PathBuf, host: String)
+        -> Result<Self, KeyStoreErr<'a>>
     {
         let inner = try!(
             CertStore::from(path)
@@ -671,15 +672,23 @@ impl<'a> KeyStore<'a> {
         /* TODO: ensure that at least a single context exists */
         /* TODO: return a default context */
 
-        let mut ks = KeyStore {
+        Ok(KeyStore {
             inner: inner,
             host: host,
             ctxs : HashMap::new(),
-            ctx_create: ctx_create,
+            ctx_create: None,
             default_ctx: None,
-        };
+        })
+    }
 
-        match ks.init_ctxs() {
+    pub fn set_ctx_create(&mut self, ctx_create: &'a CtxCreate)
+        -> Result<(), KeyStoreErr<'a>>
+    {
+        /* FIXME: this looks like a disaster regarding lifetimes */
+        self.ctx_create = Some(ctx_create);
+        self.ctxs.clear();
+        self.default_ctx = None;
+        match self.init_ctxs() {
             Err(e) => {
                 if e.kind() != io::ErrorKind::NotFound {
                     return Err(KeyStoreErr::InitCtxs(e));
@@ -688,7 +697,7 @@ impl<'a> KeyStore<'a> {
             Ok(_) => {}
         }
 
-        Ok(ks)
+        Ok(())
     }
 
     pub fn default_ctx(&self) -> Option<Rc<SslContext>> {
@@ -718,7 +727,8 @@ fn test_keystore() {
         Ok(c)
     }
     let v = &ctx_create;
-    let mut ks = KeyStore::from(td.path().to_owned(), host.to_owned(), v).expect("could not construct keystore");
+    let mut ks = KeyStore::from(td.path().to_owned(), host.to_owned()).expect("could not construct keystore");
+    ks.set_ctx_create(v).expect("could not set ctx_create");
 
     ks.insert("boop".to_owned(), cert.0, cert.1).expect("failed to insert certificate");
     let ctx1 = ks.default_ctx().expect("no context found after insert");
@@ -732,7 +742,8 @@ fn test_keystore() {
     assert!(!odds::ptr_eq(ctx1.deref(), ctx2.deref()));
 
     {
-        let ks = KeyStore::from(td.path().to_owned(), host.to_owned(), v).expect("could not construct keystore");
+        let mut ks = KeyStore::from(td.path().to_owned(), host.to_owned()).expect("could not re-construct keystore");
+        ks.set_ctx_create(v).expect("could not set ctx_create (#2)");
         let _ctx2_b = ks.default_ctx().expect("failed to reload generated keystore");
 
         /* TODO: assert_eq!(ctx2, ctx2_b); */
