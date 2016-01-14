@@ -161,7 +161,7 @@ pub mod err {
     #[derive(Debug)]
     pub enum KeyStoreErr<'a> {
         /* init */
-        CertStoreCreate(PathBuf, io::Error),
+        CertStoreCreate(io::Error),
 
         /* ctx related */
         CtxCreate(SslError),
@@ -655,7 +655,10 @@ impl<'a> KeyStore<'a> {
 
     pub fn from(path: PathBuf, host: String, ctx_create: &'a CtxCreate) -> Result<Self, KeyStoreErr<'a>>
     {
-        let inner = try!(CertStore::from(path.clone()).map_err(|e| KeyStoreErr::CertStoreCreate(path.clone(), e)));
+        let inner = try!(
+            CertStore::from(path)
+            .map_err(|e| KeyStoreErr::CertStoreCreate(e))
+        );
         /*
          * TODO
          * Probe for a key store, if none exists, create it.
