@@ -336,6 +336,28 @@ impl DirStore for Private {
     }
 }
 
+pub struct PhantomSend<T> {
+    inner: PhantomData<T>,
+}
+unsafe impl<T> Send for PhantomSend<T> {}
+
+impl<T> PhantomSend<T> {
+    pub fn new() -> Self {
+        PhantomSend { inner: PhantomData }
+    }
+}
+
+pub struct PhantomSync<T> {
+    inner: PhantomData<T>,
+}
+unsafe impl<T> Sync for PhantomSync<T> {}
+
+impl<T> PhantomSync<T> {
+    pub fn new() -> Self {
+        PhantomSync { inner: PhantomData }
+    }
+}
+
 /// Using the filesystem, keep track of a @T which can be store to and retrieved from a directory
 /// in the file system.
 ///
@@ -369,8 +391,11 @@ impl DirStore for Private {
 /// but in the future we could add file locking to address this.
 pub struct CertStore<T: DirStore> {
     pub root: PathBuf,
-    pub entry: PhantomData<T>,
+    #[allow(dead_code)]
+    entry: PhantomSend<PhantomSync<T>>,
 }
+
+/* T might not be Send, but we serialize it to disk & never keep it in memory, so we're OK */
 
 impl<T: DirStore> CertStore<T> {
     pub fn version() -> u64 {
@@ -389,7 +414,7 @@ impl<T: DirStore> CertStore<T> {
         path.push("tofu-store");
         path.push(format!("v{}", Self::version()));
         try!(fs::create_dir_all(&path));
-        Ok(CertStore { root: path, entry: PhantomData })
+        Ok(CertStore { root: path, entry: PhantomSend::new() })
     }
 
     /**
@@ -575,7 +600,12 @@ fn test_certstore () {
 ///
 ///
 
-pub type CtxCreate = Box<Fn(&Cert, &Key) -> Result<SslContext, SslError>>;
+/*
+ * FIXME: depending on how our consumers use KeyStore, this signature can be _significantly_
+ * relaxed: Boxing, Send, 'static, and Sync are only (appear to be) required for use in threaded
+ * systems.
+ */
+pub type CtxCreate = Box<Fn(&Cert, &Key) -> Result<SslContext, SslError> + Send + 'static + Sync>;
 
 /* TODO: once from_for_ptrs lands in 1.6.0, switch to parameterizing KeyStore on
  * Rc: From<SslContext> + Clone
@@ -594,6 +624,11 @@ pub struct KeyStore {
 }
 
 impl KeyStore {
+    pub fn host<'a>(&'a self) -> &'a str
+    {
+        &self.host
+    }
+
     fn ctx_create(&self, cert: &Cert, key: &Key) -> Result<SslContext, SslError>
     {
         self.ctx_create.as_ref().unwrap()(cert, key)
