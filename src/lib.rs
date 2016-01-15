@@ -10,7 +10,8 @@ extern crate odds;
 
 use tempdir::TempDir;
 
-pub use openssl::x509::X509 as Cert;
+pub use openssl::x509::X509 as CertBase;
+pub type Cert = CertBase<'static>;
 pub use openssl::crypto::pkey::PKey as Key;
 
 pub use openssl::ssl::SslContext;
@@ -159,7 +160,7 @@ pub mod err {
     }
 
     #[derive(Debug)]
-    pub enum KeyStoreErr<'a> {
+    pub enum KeyStoreErr {
         /* init */
         CertStoreCreate(io::Error),
 
@@ -169,9 +170,9 @@ pub mod err {
 
         Entry(PathBuf, io::Error),
 
-        CertStore(super::E<<super::Private<'a> as super::DirStore>::E>),
+        CertStore(super::E<<super::Private as super::DirStore>::E>),
 
-        FromDir(<super::Private<'a> as super::DirStore>::E),
+        FromDir(<super::Private as super::DirStore>::E),
     }
 }
 
@@ -192,13 +193,13 @@ pub trait DirStore {
     fn to_dir<P: AsRef<Path>>(&self, path: P) -> Result<(), Self::E>;
 }
 
-pub struct Public<'a> {
+pub struct Public {
     name: String,
-    cert: Cert<'a>,
+    cert: Cert,
 }
 
-impl<'a> PartialEq for Public<'a> {
-    fn eq(&self, other: &Public<'a>) -> bool {
+impl PartialEq for Public {
+    fn eq(&self, other: &Public) -> bool {
         use openssl::crypto::hash::Type;
         let typ = Type::SHA384;
         self.name == other.name &&
@@ -206,25 +207,25 @@ impl<'a> PartialEq for Public<'a> {
     }
 }
 
-impl<'a> fmt::Debug for Public<'a> {
+impl fmt::Debug for Public {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         write!(fmt, "Public({:?}, <cert>)", self.name)
     }
 }
 
-pub struct Private<'a> {
-    public: Public<'a>,
+pub struct Private {
+    public: Public,
     key: Key,
 }
 
-impl<'a> fmt::Debug for Private<'a> {
+impl fmt::Debug for Private {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         write!(fmt, "Private({:?}, <key>)", self.public)
     }
 }
 
-impl<'a> PartialEq for Private<'a> {
-    fn eq(&self, other: &Private<'a>) -> bool {
+impl PartialEq for Private {
+    fn eq(&self, other: &Private) -> bool {
         use openssl::crypto::hash::Type;
         let typ = Type::SHA384;
         let dummy = b"dummy-eq-data";
@@ -235,8 +236,8 @@ impl<'a> PartialEq for Private<'a> {
     }
 }
 
-impl<'a> Public<'a> {
-    fn from(name: String, cert: Cert<'a>) -> Self {
+impl Public {
+    fn from(name: String, cert: Cert) -> Self {
         Public {
             name: name,
             cert: cert
@@ -244,7 +245,7 @@ impl<'a> Public<'a> {
     }
 }
 
-impl<'a> DirStore for Public<'a> {
+impl DirStore for Public {
     type E = err::Public;
 
     fn from_dir<P: AsRef<Path>>(p: P) -> Result<Self, Self::E> {
@@ -289,8 +290,8 @@ impl<'a> DirStore for Public<'a> {
     }
 }
 
-impl<'a> Private<'a> {
-    fn from(name: String, cert: Cert<'a>, key: Key) -> Self {
+impl Private {
+    fn from(name: String, cert: Cert, key: Key) -> Self {
         Private {
             public: Public::from(name, cert),
             key: key,
@@ -298,7 +299,7 @@ impl<'a> Private<'a> {
     }
 }
 
-impl<'a> DirStore for Private<'a> {
+impl DirStore for Private {
     type E = err::Private;
 
     fn from_dir<P: AsRef<Path>>(p: P) -> Result<Self, Self::E> {
@@ -574,26 +575,31 @@ fn test_certstore () {
 ///
 ///
 
-pub type CtxCreate = Fn(&Cert, &Key) -> Result<SslContext, SslError>;
+pub type CtxCreate = Box<Fn(&Cert, &Key) -> Result<SslContext, SslError>>;
 
 /* TODO: once from_for_ptrs lands in 1.6.0, switch to parameterizing KeyStore on
  * Rc: From<SslContext> + Clone
  */
 pub type Rc<T> = std::sync::Arc<T>;
 
-pub struct KeyStore<'a> {
-    inner: CertStore<Private<'a>>,
+pub struct KeyStore {
+    inner: CertStore<Private>,
     host: String,
     ctxs: HashMap<String, Rc<SslContext>>,
-    ctx_create: Option<&'a CtxCreate>,
+    ctx_create: Option<CtxCreate>,
 
     default_ctx: Option<(Rc<SslContext>, u64)>,
 
     /* TODO: add cert_gen functionality */
 }
 
-impl<'a> KeyStore<'a> {
-    fn add_entry(&mut self, entry: Result<SerialDirItem, io::Error>) -> Result<(String, Rc<SslContext>), KeyStoreErr<'a>> {
+impl KeyStore {
+    fn ctx_create(&self, cert: &Cert, key: &Key) -> Result<SslContext, SslError>
+    {
+        self.ctx_create.as_ref().unwrap()(cert, key)
+    }
+
+    fn add_entry(&mut self, entry: Result<SerialDirItem, io::Error>) -> Result<(String, Rc<SslContext>), KeyStoreErr> {
             let entry = try!(
                 entry.map_err(|e| KeyStoreErr::Entry(self.inner.root.join(&self.host), e))
             );
@@ -606,7 +612,7 @@ impl<'a> KeyStore<'a> {
             );
 
             let ctx = try!(
-                self.ctx_create.unwrap()(&v.public.cert, &v.key)
+                self.ctx_create(&v.public.cert, &v.key)
                 .map_err(|e| KeyStoreErr::CtxCreate(e))
             );
 
@@ -618,7 +624,7 @@ impl<'a> KeyStore<'a> {
             Ok((v.public.name, ctx_rc))
     }
 
-    pub fn insert(&mut self, name: String, cert: Cert, key: Key) -> Result<u64, KeyStoreErr<'a>>
+    pub fn insert(&mut self, name: String, cert: Cert, key: Key) -> Result<u64, KeyStoreErr>
     {
         let v = Private::from(name, cert, key);
         let new_idx = try!(
@@ -626,7 +632,7 @@ impl<'a> KeyStore<'a> {
             .map_err(|e| KeyStoreErr::CertStore(e))
         );
         let new_ctx = Rc::new(try!(
-                self.ctx_create.unwrap()(&v.public.cert, &v.key)
+                self.ctx_create(&v.public.cert, &v.key)
                 .map_err(|e| KeyStoreErr::CtxCreate(e))
         ));
         self.ctxs.insert(v.public.name, new_ctx.clone());
@@ -654,7 +660,7 @@ impl<'a> KeyStore<'a> {
     }
 
     pub fn from(path: PathBuf, host: String)
-        -> Result<Self, KeyStoreErr<'a>>
+        -> Result<Self, KeyStoreErr>
     {
         let inner = try!(
             CertStore::from(path)
@@ -681,8 +687,8 @@ impl<'a> KeyStore<'a> {
         })
     }
 
-    pub fn set_ctx_create(&mut self, ctx_create: &'a CtxCreate)
-        -> Result<(), KeyStoreErr<'a>>
+    pub fn set_ctx_create(&mut self, ctx_create: CtxCreate)
+        -> Result<(), KeyStoreErr>
     {
         /* FIXME: this looks like a disaster regarding lifetimes */
         self.ctx_create = Some(ctx_create);
@@ -726,7 +732,7 @@ fn test_keystore() {
         try!(c.set_private_key(key));
         Ok(c)
     }
-    let v = &ctx_create;
+    let v = Box::new(ctx_create);
     let mut ks = KeyStore::from(td.path().to_owned(), host.to_owned()).expect("could not construct keystore");
     ks.set_ctx_create(v).expect("could not set ctx_create");
 
@@ -743,9 +749,27 @@ fn test_keystore() {
 
     {
         let mut ks = KeyStore::from(td.path().to_owned(), host.to_owned()).expect("could not re-construct keystore");
-        ks.set_ctx_create(v).expect("could not set ctx_create (#2)");
+        ks.set_ctx_create(Box::new(ctx_create)).expect("could not set ctx_create (#2)");
         let _ctx2_b = ks.default_ctx().expect("failed to reload generated keystore");
 
         /* TODO: assert_eq!(ctx2, ctx2_b); */
     }
+}
+
+#[test]
+fn test_keystore_lambda() {
+    use std::ops::Deref;
+    use openssl::ssl;
+    let cert = some_cert("tofu-1".to_owned());
+    let td = TempDir::new("tofu-test").unwrap();
+
+    let host = "host-for-keystore";
+    let mut ks = KeyStore::from(td.path().to_owned(), host.to_owned()).expect("could not construct keystore");
+    let v = Box::new(move |cert: &Cert, key : &Key| {
+        let mut c = try!(ssl::SslContext::new(ssl::SslMethod::Sslv23));
+        try!(c.set_certificate(cert));
+        try!(c.set_private_key(key));
+        Ok(c)
+    });
+    ks.set_ctx_create(v).expect("could not set ctx_create");
 }
