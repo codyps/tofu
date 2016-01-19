@@ -246,7 +246,7 @@ impl PartialEq for Private {
 }
 
 impl Public {
-    fn from(name: String, cert: Cert) -> Self {
+    pub fn from(name: String, cert: Cert) -> Self {
         Public {
             name: name,
             cert: cert
@@ -300,7 +300,7 @@ impl DirStore for Public {
 }
 
 impl Private {
-    fn from(name: String, cert: Cert, key: Key) -> Self {
+    pub fn from(name: String, cert: Cert, key: Key) -> Self {
         Private {
             public: Public::from(name, cert),
             key: key,
