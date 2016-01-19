@@ -802,9 +802,8 @@ fn test_keystore() {
 
 #[test]
 fn test_keystore_lambda() {
-    use std::ops::Deref;
     use openssl::ssl;
-    let cert = some_cert("tofu-1".to_owned());
+    let _cert = some_cert("tofu-1".to_owned());
     let td = TempDir::new("tofu-test").unwrap();
 
     let host = "host-for-keystore";
