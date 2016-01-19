@@ -439,7 +439,6 @@ impl<T: DirStore> CertStore<T> {
             Ok(x) => x,
             Err(e) => {
                 if e.kind() == io::ErrorKind::NotFound {
-                    warn!("Not found: {:?}", &p);
                     return Ok(None)
                 } else {
                     return Err(e);
