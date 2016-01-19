@@ -10,8 +10,8 @@ extern crate odds;
 
 use tempdir::TempDir;
 
-pub use openssl::x509::X509 as CertBase;
-pub type Cert = CertBase<'static>;
+pub use openssl::x509::X509 as Cert;
+pub type CertOwned = Cert<'static>;
 pub use openssl::crypto::pkey::PKey as Key;
 
 pub use openssl::ssl::SslContext;
@@ -160,7 +160,7 @@ pub mod err {
     }
 
     #[derive(Debug)]
-    pub enum KeyStoreErr {
+    pub enum KeyStoreErr<'a> {
         /* init */
         CertStoreCreate(io::Error),
 
@@ -170,9 +170,9 @@ pub mod err {
 
         Entry(PathBuf, io::Error),
 
-        CertStore(super::E<<super::Private as super::DirStore>::E>),
+        CertStore(super::E<<super::Private<'a> as super::DirStore>::E>),
 
-        FromDir(<super::Private as super::DirStore>::E),
+        FromDir(<super::Private<'a> as super::DirStore>::E),
     }
 }
 
@@ -188,18 +188,19 @@ fn name_load<P: AsRef<Path>>(p: P) -> Result<String, err::NameLoad>
 
 pub trait DirStore {
     type E;
-    fn from_dir<P: AsRef<Path>>(path: P) -> Result<Self, Self::E>
+    type Owned;
+    fn from_dir<P: AsRef<Path>>(path: P) -> Result<Self::Owned, Self::E>
         where Self: Sized;
     fn to_dir<P: AsRef<Path>>(&self, path: P) -> Result<(), Self::E>;
 }
 
-pub struct Public {
+pub struct Public<'cert> {
     pub name: String,
-    pub cert: Cert,
+    pub cert: Cert<'cert>,
 }
 
-impl PartialEq for Public {
-    fn eq(&self, other: &Public) -> bool {
+impl<'a> PartialEq for Public<'a> {
+    fn eq(&self, other: &Public<'a>) -> bool {
         use openssl::crypto::hash::Type;
         let typ = Type::SHA384;
         if self.name != other.name {
@@ -216,25 +217,25 @@ impl PartialEq for Public {
     }
 }
 
-impl fmt::Debug for Public {
+impl<'a> fmt::Debug for Public<'a> {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         write!(fmt, "Public({:?}, <cert>)", self.name)
     }
 }
 
-pub struct Private {
-    pub public: Public,
+pub struct Private<'a> {
+    pub public: Public<'a>,
     pub key: Key,
 }
 
-impl fmt::Debug for Private {
+impl<'a> fmt::Debug for Private<'a> {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> Result<(), fmt::Error> {
         write!(fmt, "Private({:?}, <key>)", self.public)
     }
 }
 
-impl PartialEq for Private {
-    fn eq(&self, other: &Private) -> bool {
+impl<'a> PartialEq for Private<'a> {
+    fn eq(&self, other: &Private<'a>) -> bool {
         use openssl::crypto::hash::Type;
         let typ = Type::SHA384;
         let dummy = b"dummy-eq-data";
@@ -245,8 +246,8 @@ impl PartialEq for Private {
     }
 }
 
-impl Public {
-    pub fn from(name: String, cert: Cert) -> Self {
+impl<'a> Public<'a> {
+    pub fn from(name: String, cert: Cert<'a>) -> Self {
         Public {
             name: name,
             cert: cert
@@ -254,10 +255,11 @@ impl Public {
     }
 }
 
-impl DirStore for Public {
+impl<'a> DirStore for Public<'a> {
     type E = err::Public;
+    type Owned = Public<'static>;
 
-    fn from_dir<P: AsRef<Path>>(p: P) -> Result<Self, Self::E> {
+    fn from_dir<P: AsRef<Path>>(p: P) -> Result<Self::Owned, Self::E> {
         let name = try!(
             name_load(p.as_ref().join("name"))
             .map_err(|e| err::Public::NameLoad(e))
@@ -299,8 +301,8 @@ impl DirStore for Public {
     }
 }
 
-impl Private {
-    pub fn from(name: String, cert: Cert, key: Key) -> Self {
+impl<'a> Private<'a> {
+    pub fn from(name: String, cert: Cert<'a>, key: Key) -> Self {
         Private {
             public: Public::from(name, cert),
             key: key,
@@ -308,10 +310,11 @@ impl Private {
     }
 }
 
-impl DirStore for Private {
+impl<'a> DirStore for Private<'a> {
     type E = err::Private;
+    type Owned = Private<'static>;
 
-    fn from_dir<P: AsRef<Path>>(p: P) -> Result<Self, Self::E> {
+    fn from_dir<P: AsRef<Path>>(p: P) -> Result<Self::Owned, Self::E> {
         let public = try!(
             Public::from_dir(&p)
             .map_err(|e| err::Private::Public(e))
@@ -466,7 +469,7 @@ impl<T: DirStore> CertStore<T> {
      *
      * FIXME: we really want an iterator that starts at the last entry and proceeds backwards
      */
-    pub fn latest(&self, host: &str) -> Result<Option<(T, u64)>, E<T::E>> {
+    pub fn latest(&self, host: &str) -> Result<Option<(T::Owned, u64)>, E<T::E>> {
         let h = try!(
             self.latest_entry(host)
             .map_err(|e| E::LatestEntry(e))
@@ -621,8 +624,8 @@ pub type CtxCreate = Box<Fn(&Cert, &Key) -> Result<SslContext, SslError> + Send 
  */
 pub type Rc<T> = std::sync::Arc<T>;
 
-pub struct KeyStore {
-    inner: CertStore<Private>,
+pub struct KeyStore<'a> {
+    inner: CertStore<Private<'a>>,
     host: String,
     ctxs: HashMap<String, Rc<SslContext>>,
     ctx_create: Option<CtxCreate>,
@@ -632,18 +635,18 @@ pub struct KeyStore {
     /* TODO: add cert_gen functionality */
 }
 
-impl KeyStore {
+impl<'cert> KeyStore<'cert> {
     pub fn host<'a>(&'a self) -> &'a str
     {
         &self.host
     }
 
-    fn ctx_create(&self, cert: &Cert, key: &Key) -> Result<SslContext, SslError>
+    fn ctx_create<'a>(&self, cert: &Cert<'a>, key: &Key) -> Result<SslContext, SslError>
     {
         self.ctx_create.as_ref().unwrap()(cert, key)
     }
 
-    fn add_entry(&mut self, entry: Result<SerialDirItem, io::Error>) -> Result<(String, Rc<SslContext>), KeyStoreErr> {
+    fn add_entry(&mut self, entry: Result<SerialDirItem, io::Error>) -> Result<(String, Rc<SslContext>), KeyStoreErr<'cert>> {
             let entry = try!(
                 entry.map_err(|e| KeyStoreErr::Entry(self.inner.root.join(&self.host), e))
             );
@@ -668,7 +671,7 @@ impl KeyStore {
             Ok((v.public.name, ctx_rc))
     }
 
-    pub fn insert(&mut self, name: String, cert: Cert, key: Key) -> Result<u64, KeyStoreErr>
+    pub fn insert(&mut self, name: String, cert: Cert, key: Key) -> Result<u64, KeyStoreErr<'cert>>
     {
         let v = Private::from(name, cert, key);
         let new_idx = try!(
@@ -704,7 +707,7 @@ impl KeyStore {
     }
 
     pub fn from(path: PathBuf, host: String)
-        -> Result<Self, KeyStoreErr>
+        -> Result<Self, KeyStoreErr<'cert>>
     {
         let inner = try!(
             CertStore::from(path)
