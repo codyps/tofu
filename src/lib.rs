@@ -194,16 +194,25 @@ pub trait DirStore {
 }
 
 pub struct Public {
-    name: String,
-    cert: Cert,
+    pub name: String,
+    pub cert: Cert,
 }
 
 impl PartialEq for Public {
     fn eq(&self, other: &Public) -> bool {
         use openssl::crypto::hash::Type;
         let typ = Type::SHA384;
-        self.name == other.name &&
-            self.cert.fingerprint(typ) == other.cert.fingerprint(typ)
+        if self.name != other.name {
+            return false;
+        }
+        let fp1 = self.cert.fingerprint(typ);
+        let fp2 = other.cert.fingerprint(typ);
+
+        if !fp1.is_some() || !fp2.is_some() {
+            return false;
+        }
+
+        fp1.unwrap() == fp2.unwrap()
     }
 }
 
@@ -214,8 +223,8 @@ impl fmt::Debug for Public {
 }
 
 pub struct Private {
-    public: Public,
-    key: Key,
+    pub public: Public,
+    pub key: Key,
 }
 
 impl fmt::Debug for Private {
