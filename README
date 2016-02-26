@@ -4,4 +4,8 @@ TOFO: Trust On First Use
 Code to ease implimentations of systems that impliment trust-on-first-use, or
 even systems that just need to support zero-downtime certificate upgrading.
 
-This is currently incomplete
+Provides a mechanism for storing information (certificates, private keys, names)
+for client & local systems to the filesystem.
+
+Doesn't quite make usage fool proof yet due to allowing users to control naming
+of certificates & hosts
